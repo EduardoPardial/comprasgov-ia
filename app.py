@@ -273,32 +273,35 @@ def buscar_catser(termos):
 
 
 def buscar_precos_material(codigo_item):
-    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/2_consultarMaterialDetalhe"
+    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/1_consultarMaterial"
 
     params = {
         "pagina": 1,
         "tamanhoPagina": limite,
-        "codigoItem": codigo_item
+        "codigoItemCatalogo": codigo_item
     }
 
     return consultar_api(url, params)
 
 
 def buscar_precos_servico(codigo_servico):
-    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/4_consultarServicoDetalhe"
+    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/3_consultarServico"
 
     params = {
         "pagina": 1,
         "tamanhoPagina": limite,
-        "codigoServico": codigo_servico
+        "codigoItemCatalogo": codigo_servico
     }
 
     return consultar_api(url, params)
 
 
 def montar_link_generico(item):
-    # Este link é genérico por enquanto.
-    # Depois do diagnóstico, ajustamos para o link exato do processo/compra.
+    id_compra = item.get("idCompra", "")
+
+    if id_compra:
+        return f"https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/compras/acompanhamento-compra?compra={id_compra}"
+
     return "https://www.gov.br/compras/pt-br"
 
 
