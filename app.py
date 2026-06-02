@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -7,29 +8,28 @@ import streamlit as st
 from google import genai
 
 
-st.set_page_config(page_title="Busca Compras.gov IA", layout="wide")
+st.set_page_config(page_title="Compras.gov + PNCP", layout="wide")
 
-st.title("Busca Compras.gov IA")
-st.caption("Busca CATMAT/CATSER e tenta localizar compras/preços relacionados.")
+st.title("Compras.gov + PNCP")
+st.caption("Busca compras/preços reais no Compras.gov e gera link de pesquisa no PNCP.")
 
 
 texto = st.text_input(
     "Digite o objeto ou serviço",
-    placeholder="Ex: pneu 175/70 R14, água mineral, serviço de borracharia"
+    placeholder="Ex: borracharia, pneus, água mineral, sistema ISSQN"
 )
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    buscar_catmat = st.checkbox("Buscar CATMAT / Material", value=True)
+    buscar_material = st.checkbox("Buscar materiais", value=True)
 
 with col2:
-    buscar_catser = st.checkbox("Buscar CATSER / Serviço", value=True)
+    buscar_servico = st.checkbox("Buscar serviços", value=True)
 
 with col3:
     limite = st.slider("Resultados por termo", 5, 30, 10)
 
-buscar_precos = st.checkbox("Buscar processos/preços após encontrar códigos", value=True)
 modo_diagnostico = st.checkbox("Modo diagnóstico", value=False)
 
 
@@ -78,25 +78,22 @@ def gerar_termos_gemini(objeto):
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
         prompt = f"""
-Você é especialista em compras públicas brasileiras, CATMAT e CATSER.
+Você é especialista em compras públicas brasileiras.
 
-Gere até 3 termos de busca para encontrar o item abaixo no catálogo Compras.gov.
+Gere até 3 termos curtos para pesquisar compras públicas relacionadas ao objeto abaixo.
 
 Objeto:
 {objeto}
 
 Regras:
 - No máximo 3 termos.
-- Termos curtos.
-- Priorize palavras usadas em catálogo público.
-- Se for material, use termos de material.
-- Se for serviço, use termos de serviço.
-- Não explique nada.
+- Use termos comuns em editais e descrições de itens.
+- Não use termos genéricos demais.
 - Retorne apenas um termo por linha.
 """
 
         resposta = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+            model="gemini-2.5-flash",
             contents=prompt
         )
 
@@ -122,29 +119,6 @@ Regras:
         return gerar_buscas_simples(objeto)
 
 
-def pontuar(texto_resultado, busca_original, termos):
-    base = limpar_texto(texto_resultado)
-    busca = limpar_texto(busca_original)
-
-    pontos = 0
-
-    if busca and busca in base:
-        pontos += 20
-
-    for termo in termos:
-        termo_limpo = limpar_texto(termo)
-
-        if termo_limpo and termo_limpo in base:
-            pontos += 15
-
-        for palavra in termo_limpo.split():
-            if palavra not in PALAVRAS_IGNORADAS and len(palavra) > 2:
-                if palavra in base:
-                    pontos += 3
-
-    return pontos
-
-
 def consultar_api(url, params):
     try:
         resposta = requests.get(url, params=params, timeout=20)
@@ -157,14 +131,9 @@ def consultar_api(url, params):
         if isinstance(dados, list):
             return dados
 
-        if "resultado" in dados:
-            return dados.get("resultado", [])
-
-        if "data" in dados:
-            return dados.get("data", [])
-
-        if "content" in dados:
-            return dados.get("content", [])
+        for chave in ["resultado", "data", "content", "items"]:
+            if chave in dados and isinstance(dados[chave], list):
+                return dados[chave]
 
         return []
 
@@ -176,133 +145,27 @@ def texto_item(item):
     return " ".join(str(v) for v in item.values() if v)
 
 
-def buscar_catmat(termos):
-    url = "https://dadosabertos.compras.gov.br/modulo-material/4_consultarItemMaterial"
+def pontuar(texto_resultado, busca_original, termos):
+    base = limpar_texto(texto_resultado)
+    busca = limpar_texto(busca_original)
 
-    resultados = []
+    pontos = 0
 
-    for termo in termos:
-        params = {
-            "pagina": 1,
-            "tamanhoPagina": limite,
-            "descricao": termo
-        }
-
-        itens = consultar_api(url, params)
-
-        for item in itens:
-            texto_completo = texto_item(item)
-            pontos = pontuar(texto_completo, texto, [termo])
-
-            if pontos <= 0:
-                continue
-
-            codigo = (
-                item.get("codigoItem")
-                or item.get("codigoMaterial")
-                or item.get("codigo")
-                or item.get("id")
-            )
-
-            descricao = (
-                item.get("descricaoItem")
-                or item.get("nomeItem")
-                or item.get("descricao")
-                or texto_completo
-            )
-
-            resultados.append({
-                "Pontuação": pontos,
-                "Tipo": "CATMAT",
-                "Código": codigo,
-                "Descrição": descricao,
-                "Status": item.get("statusItem") or item.get("status") or "",
-                "Termo usado": termo,
-                "_bruto": item
-            })
-
-    return resultados
-
-
-def buscar_catser(termos):
-    url = "https://dadosabertos.compras.gov.br/modulo-servico/6_consultarItemServico"
-
-    resultados = []
+    if busca and busca in base:
+        pontos += 30
 
     for termo in termos:
-        params = {
-            "pagina": 1,
-            "tamanhoPagina": limite,
-            "descricao": termo
-        }
+        termo_limpo = limpar_texto(termo)
 
-        itens = consultar_api(url, params)
+        if termo_limpo and termo_limpo in base:
+            pontos += 20
 
-        for item in itens:
-            texto_completo = texto_item(item)
-            pontos = pontuar(texto_completo, texto, [termo])
+        for palavra in termo_limpo.split():
+            if palavra not in PALAVRAS_IGNORADAS and len(palavra) > 2:
+                if palavra in base:
+                    pontos += 5
 
-            if pontos <= 0:
-                continue
-
-            codigo = (
-                item.get("codigoServico")
-                or item.get("codigoItem")
-                or item.get("codigo")
-                or item.get("id")
-            )
-
-            descricao = (
-                item.get("nomeServico")
-                or item.get("descricaoServico")
-                or item.get("descricao")
-                or texto_completo
-            )
-
-            resultados.append({
-                "Pontuação": pontos,
-                "Tipo": "CATSER",
-                "Código": codigo,
-                "Descrição": descricao,
-                "Status": item.get("statusServico") or item.get("status") or "",
-                "Termo usado": termo,
-                "_bruto": item
-            })
-
-    return resultados
-
-
-def buscar_precos_material(codigo_item):
-    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/1_consultarMaterial"
-
-    params = {
-        "pagina": 1,
-        "tamanhoPagina": limite,
-        "codigoItemCatalogo": codigo_item
-    }
-
-    return consultar_api(url, params)
-
-
-def buscar_precos_servico(codigo_servico):
-    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/3_consultarServico"
-
-    params = {
-        "pagina": 1,
-        "tamanhoPagina": limite,
-        "codigoItemCatalogo": codigo_servico
-    }
-
-    return consultar_api(url, params)
-
-
-def montar_link_generico(item):
-    id_compra = item.get("idCompra", "")
-
-    if id_compra:
-        return f"https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/compras/acompanhamento-compra?compra={id_compra}"
-
-    return "https://www.gov.br/compras/pt-br"
+    return pontos
 
 
 def extrair_campo(item, opcoes):
@@ -313,43 +176,132 @@ def extrair_campo(item, opcoes):
     return ""
 
 
-def montar_resultados_processos(codigos_encontrados):
-    processos = []
+def link_busca_pncp(objeto, orgao=""):
+    termo = f"{objeto} {orgao}".strip()
+    return f"https://pncp.gov.br/app/editais?q={quote_plus(termo)}"
 
-    for cod in codigos_encontrados:
-        tipo = cod["Tipo"]
-        codigo = cod["Código"]
-        descricao_base = cod["Descrição"]
 
-        if not codigo:
-            continue
+def link_comprasgov(item):
+    id_compra = extrair_campo(item, ["idCompra", "compraId", "id"])
 
-        if tipo == "CATMAT":
-            precos = buscar_precos_material(codigo)
-        else:
-            precos = buscar_precos_servico(codigo)
+    if id_compra:
+        return f"https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/compras/acompanhamento-compra?compra={id_compra}"
 
-        if modo_diagnostico and precos:
-            st.subheader("Diagnóstico - primeiro preço/processo bruto retornado")
-            st.write(f"Tipo: {tipo} | Código: {codigo}")
-            st.json(precos[0])
+    return "https://cnetmobile.estaleiro.serpro.gov.br/comprasnet-web/public/compras"
+
+
+def buscar_material_precos(termos):
+    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/1_consultarMaterial"
+    resultados = []
+
+    for termo in termos:
+        params = {
+            "pagina": 1,
+            "tamanhoPagina": limite,
+            "descricao": termo
+        }
+
+        itens = consultar_api(url, params)
+
+        if modo_diagnostico and itens:
+            st.subheader("Diagnóstico - primeiro material bruto")
+            st.json(itens[0])
             st.stop()
 
-        for preco in precos:
-            processos.append({
-                "Tipo": tipo,
-                "Código": codigo,
-                "Descrição base": descricao_base,
-                "Órgão": extrair_campo(preco, ["nomeOrgao", "orgao", "nomeUasg", "nomeUnidade"]),
-                "UASG": extrair_campo(preco, ["codigoUasg", "uasg", "codigoUnidade"]),
-                "Compra": extrair_campo(preco, ["numeroCompra", "numeroPregao", "compra", "numero"]),
-                "Ano": extrair_campo(preco, ["anoCompra", "anoPregao", "ano"]),
-                "Valor": extrair_campo(preco, ["valorUnitario", "valorHomologado", "valor", "precoUnitario"]),
-                "Data": extrair_campo(preco, ["dataResultado", "dataCompra", "dataHomologacao", "data"]),
-                "Link": montar_link_generico(preco)
+        for item in itens:
+            texto_completo = texto_item(item)
+            pontos = pontuar(texto_completo, texto, [termo])
+
+            if pontos <= 0:
+                continue
+
+            descricao = extrair_campo(item, [
+                "descricaoItem",
+                "descricaoMaterial",
+                "descricao",
+                "nomeItem"
+            ]) or texto_completo
+
+            orgao = extrair_campo(item, [
+                "nomeOrgao",
+                "orgao",
+                "nomeUasg",
+                "nomeUnidade"
+            ])
+
+            resultados.append({
+                "Pontuação": pontos,
+                "Tipo": "Material",
+                "Descrição": descricao,
+                "Órgão": orgao,
+                "UASG": extrair_campo(item, ["codigoUasg", "uasg", "codigoUnidade"]),
+                "Compra": extrair_campo(item, ["numeroCompra", "numeroPregao", "compra", "numero"]),
+                "Ano": extrair_campo(item, ["anoCompra", "anoPregao", "ano"]),
+                "Valor": extrair_campo(item, ["valorUnitario", "valorHomologado", "valor", "precoUnitario"]),
+                "Data": extrair_campo(item, ["dataResultado", "dataCompra", "dataHomologacao", "data"]),
+                "Termo usado": termo,
+                "Link Compras.gov": link_comprasgov(item),
+                "Link busca PNCP": link_busca_pncp(descricao, orgao)
             })
 
-    return processos
+    return resultados
+
+
+def buscar_servico_precos(termos):
+    url = "https://dadosabertos.compras.gov.br/modulo-pesquisa-preco/3_consultarServico"
+    resultados = []
+
+    for termo in termos:
+        params = {
+            "pagina": 1,
+            "tamanhoPagina": limite,
+            "descricao": termo
+        }
+
+        itens = consultar_api(url, params)
+
+        if modo_diagnostico and itens:
+            st.subheader("Diagnóstico - primeiro serviço bruto")
+            st.json(itens[0])
+            st.stop()
+
+        for item in itens:
+            texto_completo = texto_item(item)
+            pontos = pontuar(texto_completo, texto, [termo])
+
+            if pontos <= 0:
+                continue
+
+            descricao = extrair_campo(item, [
+                "descricaoServico",
+                "descricaoItem",
+                "descricao",
+                "nomeServico"
+            ]) or texto_completo
+
+            orgao = extrair_campo(item, [
+                "nomeOrgao",
+                "orgao",
+                "nomeUasg",
+                "nomeUnidade"
+            ])
+
+            resultados.append({
+                "Pontuação": pontos,
+                "Tipo": "Serviço",
+                "Descrição": descricao,
+                "Órgão": orgao,
+                "UASG": extrair_campo(item, ["codigoUasg", "uasg", "codigoUnidade"]),
+                "Compra": extrair_campo(item, ["numeroCompra", "numeroPregao", "compra", "numero"]),
+                "Ano": extrair_campo(item, ["anoCompra", "anoPregao", "ano"]),
+                "Valor": extrair_campo(item, ["valorUnitario", "valorHomologado", "valor", "precoUnitario"]),
+                "Data": extrair_campo(item, ["dataResultado", "dataCompra", "dataHomologacao", "data"]),
+                "Termo usado": termo,
+                "Link Compras.gov": link_comprasgov(item),
+                "Link busca PNCP": link_busca_pncp(descricao, orgao)
+            })
+
+    return resultados
 
 
 if st.button("Buscar"):
@@ -363,80 +315,51 @@ if st.button("Buscar"):
     st.subheader("Termos usados")
     st.write(termos)
 
-    resultados_catalogo = []
+    resultados = []
 
-    with st.spinner("Consultando CATMAT/CATSER no Compras.gov..."):
-        if buscar_catmat:
-            resultados_catalogo.extend(buscar_catmat(termos))
+    with st.spinner("Consultando compras/preços reais no Compras.gov..."):
+        if buscar_material:
+            resultados.extend(buscar_material_precos(termos))
 
-        if buscar_catser:
-            resultados_catalogo.extend(buscar_catser(termos))
+        if buscar_servico:
+            resultados.extend(buscar_servico_precos(termos))
 
-    if not resultados_catalogo:
-        st.warning("Nenhum CATMAT/CATSER relevante encontrado.")
+    if not resultados:
+        st.warning("Nenhum resultado relevante encontrado.")
         st.stop()
 
-    df_catalogo = pd.DataFrame([
-        {k: v for k, v in r.items() if k != "_bruto"}
-        for r in resultados_catalogo
-    ])
+    df = pd.DataFrame(resultados)
+    df = df.drop_duplicates(subset=["Tipo", "Descrição", "Órgão", "Compra", "Ano"])
+    df = df.sort_values(by="Pontuação", ascending=False)
 
-    df_catalogo = df_catalogo.drop_duplicates(subset=["Tipo", "Código", "Descrição"])
-    df_catalogo = df_catalogo.sort_values(by="Pontuação", ascending=False)
+    st.subheader("Resultados encontrados")
 
-    st.subheader("Códigos encontrados")
-    st.dataframe(df_catalogo, use_container_width=True, hide_index=True)
-
-    if not buscar_precos:
-        csv = df_catalogo.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "Baixar códigos em CSV",
-            csv,
-            "comprasgov_codigos.csv",
-            "text/csv"
-        )
-        st.stop()
-
-    codigos_para_pesquisar = df_catalogo.head(5).to_dict("records")
-
-    with st.spinner("Buscando processos/preços relacionados aos códigos encontrados..."):
-        processos = montar_resultados_processos(codigos_para_pesquisar)
-
-    if not processos:
-        st.warning(
-            "Códigos encontrados, mas nenhum processo/preço foi retornado. "
-            "Ative o modo diagnóstico para analisarmos os campos reais da API."
-        )
-        st.stop()
-
-    df_processos = pd.DataFrame(processos)
-    df_processos = df_processos.drop_duplicates()
-
-    st.subheader("Processos / preços encontrados")
-
-    for _, row in df_processos.iterrows():
+    for _, row in df.iterrows():
         st.markdown(f"""
-### {row['Descrição base']}
+### {row['Descrição']}
 
+**Pontuação:** {row['Pontuação']}  
 **Tipo:** {row['Tipo']}  
-**Código:** `{row['Código']}`  
 **Órgão:** {row['Órgão']}  
 **UASG:** {row['UASG']}  
 **Compra:** {row['Compra']}  
 **Ano:** {row['Ano']}  
 **Valor:** {row['Valor']}  
 **Data:** {row['Data']}  
+**Termo usado:** {row['Termo usado']}  
 
-<a href="{row['Link']}" target="_blank">Abrir Compras.gov</a>
+<a href="{row['Link Compras.gov']}" target="_blank">Abrir Compras.gov</a>
+&nbsp; | &nbsp;
+<a href="{row['Link busca PNCP']}" target="_blank">Buscar no PNCP</a>
 
 ---
 """, unsafe_allow_html=True)
 
-    csv = df_processos.to_csv(index=False).encode("utf-8-sig")
+    csv = df.to_csv(index=False).encode("utf-8-sig")
 
     st.download_button(
-        "Baixar processos/preços em CSV",
+        "Baixar CSV",
         csv,
-        "comprasgov_processos_precos.csv",
+        "comprasgov_processos.csv",
         "text/csv"
     )
